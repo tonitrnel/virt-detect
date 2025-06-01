@@ -1,0 +1,27 @@
+{
+  "name": "virtualization-checker",
+  "version": "0.0.0",
+  "main": "index.js",
+  "types": "index.d.ts",
+  "napi": {
+    "name": "virtualization-checker",
+    "triples": {}
+  },
+  "license": "MIT",
+  "devDependencies": {
+    "@napi-rs/cli": "^2.18.4",
+    "vitest": "^3.1.4"
+  },
+  "engines": {
+    "node": ">= 10"
+  },
+  "scripts": {
+    "artifacts": "napi artifacts",
+    "build": "napi build --platform --release --cargo-name=virtualization_checker",
+    "build:debug": "napi build --platform --cargo-name=virtualization_checker",
+    "prepublishOnly": "napi prepublish -t npm",
+    "universal": "napi universal",
+    "version": "napi version",
+    "test": "vitest run"
+  }
+}
