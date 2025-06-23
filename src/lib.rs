@@ -138,23 +138,15 @@ pub fn is_hyperv_enabled() -> bool {
 #[cfg(target_os = "windows")]
 #[napi]
 pub fn is_wsl_enabled() -> bool {
-    use winreg::RegKey;
-    use winreg::enums::HKEY_LOCAL_MACHINE;
-
     check_wsl_via_wmi()
-        .map_err(|_|{
-            RegKey::predef(HKEY_LOCAL_MACHINE)
-                .open_subkey("SYSTEM\\CurrentControlSet\\Services\\WslService")
-        })
         .map_err(|_| {
-            RegKey::predef(HKEY_LOCAL_MACHINE)
-                .open_subkey("SYSTEM\\CurrentControlSet\\Services\\LxssManager")
-        })
-        .map_err(|_| {
+            use winreg::RegKey;
+            use winreg::enums::HKEY_LOCAL_MACHINE;
+
             RegKey::predef(HKEY_LOCAL_MACHINE)
                 .open_subkey("SYSTEM\\CurrentControlSet\\Services\\lxss")
         })
-        .is_ok()
+        .unwrap_or(false)
 }
 
 #[derive(Deserialize, Debug)]
