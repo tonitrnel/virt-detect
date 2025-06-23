@@ -1,4 +1,6 @@
 use napi_derive::napi;
+use serde::Deserialize;
+use std::path::Path;
 
 mod core;
 
@@ -78,5 +80,159 @@ pub fn get_virtualization() -> VirtualizationInfo {
         os_reported_enabled,
         os_check_details,
         overall_status_message,
+    }
+}
+
+#[napi(object)]
+pub struct SystemEncoding {
+    pub ansi_code: u32,
+    pub oem_code: u32,
+    pub ansi_encoding: &'static str,
+    pub oem_encoding: &'static str,
+}
+
+#[cfg(target_os = "windows")]
+#[napi]
+pub fn get_system_encoding() -> SystemEncoding {
+    use windows::Win32::Globalization::{GetACP, GetOEMCP};
+
+    let ansi_code = unsafe { GetACP() };
+    let ansi_encoding = match ansi_code {
+        65001 => "UTF-8",
+        936 => "GBK",
+        950 => "BIG5",
+        1252 => "WINDOWS-1252",
+        932 => "SHIFT-JIS",
+        _ => "UNKNOWN",
+    };
+    let oem_code = unsafe { GetOEMCP() };
+    let oem_encoding = match oem_code {
+        65001 => "UTF-8",
+        936 => "GBK",
+        950 => "BIG5",
+        1252 => "WINDOWS-1252",
+        932 => "SHIFT-JIS",
+        _ => "UNKNOWN",
+    };
+    SystemEncoding {
+        ansi_code,
+        ansi_encoding,
+        oem_code,
+        oem_encoding,
+    }
+}
+
+#[napi]
+pub fn get_version() -> &'static str {
+    env!("CARGO_PKG_VERSION")
+}
+
+#[cfg(target_os = "windows")]
+#[napi]
+pub fn is_hyperv_enabled() -> bool {
+    check_hyperv_via_wmi().unwrap_or_else(|_|{
+        Path::new("C:\\Windows\\System32\\vmcompute.exe").exists()
+    })
+}
+
+#[cfg(target_os = "windows")]
+#[napi]
+pub fn is_wsl_enabled() -> bool {
+    use winreg::RegKey;
+    use winreg::enums::HKEY_LOCAL_MACHINE;
+
+    check_wsl_via_wmi()
+        .map_err(|_|{
+            RegKey::predef(HKEY_LOCAL_MACHINE)
+                .open_subkey("SYSTEM\\CurrentControlSet\\Services\\WslService")
+        })
+        .map_err(|_| {
+            RegKey::predef(HKEY_LOCAL_MACHINE)
+                .open_subkey("SYSTEM\\CurrentControlSet\\Services\\LxssManager")
+        })
+        .map_err(|_| {
+            RegKey::predef(HKEY_LOCAL_MACHINE)
+                .open_subkey("SYSTEM\\CurrentControlSet\\Services\\lxss")
+        })
+        .is_ok()
+}
+
+#[derive(Deserialize, Debug)]
+#[serde(rename = "Win32_OptionalFeature")]
+#[serde(rename_all = "PascalCase")]
+struct OptionalFeature {
+    // InstallState: 1 = Enabled, 2 = Disabled, 3 = Absent
+    install_state: u32,
+}
+
+#[cfg(target_os = "windows")]
+fn check_wsl_via_wmi() -> Result<bool, wmi::WMIError> {
+    use wmi::{COMLibrary, WMIConnection};
+    let com_lib = COMLibrary::new()?;
+    let wmi_con = WMIConnection::new(com_lib.into())?;
+
+    // 构建 WMI 查询
+    let query = "SELECT InstallState FROM Win32_OptionalFeature WHERE Name = 'Microsoft-Windows-Subsystem-Linux'";
+
+    let results: Vec<OptionalFeature> = wmi_con.raw_query(query)?;
+    if let Some(feature) = results.first() {
+        // println!("通过 WMI 查询到功能状态: {:?}", feature);
+        // InstallState == 1 意味着 "Enabled"
+        Ok(feature.install_state == 1)
+    } else {
+        // println!("WMI 查询未返回任何关于 'Microsoft-Windows-Subsystem-Linux' 的信息。");
+        Ok(false)
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn check_hyperv_via_wmi() -> Result<bool, wmi::WMIError> {
+    use wmi::{COMLibrary, WMIConnection};
+    let com_lib = COMLibrary::new()?;
+    let wmi_con = WMIConnection::new(com_lib.into())?;
+
+    // 构建 WMI 查询
+    let query = "SELECT InstallState FROM Win32_OptionalFeature WHERE Name = 'Microsoft-Hyper-V-All'";
+
+    let results: Vec<OptionalFeature> = wmi_con.raw_query(query)?;
+    if let Some(feature) = results.first() {
+        // println!("通过 WMI 查询到功能状态: {:?}", feature);
+        // InstallState == 1 意味着 "Enabled"
+        Ok(feature.install_state == 1)
+    } else {
+        // println!("WMI 查询未返回任何关于 'Microsoft-Windows-Subsystem-Linux' 的信息。");
+        Ok(false)
+    }
+}
+
+#[cfg(target_os = "windows")]
+pub fn get_gpu_guid() {
+    use std::collections::HashMap;
+    use wmi::{COMLibrary, Variant, WMIConnection};
+
+    // 初始化 COM 和 WMI 连接
+    let com_con = COMLibrary::new().unwrap();
+    let wmi_con = WMIConnection::new(com_con.into()).unwrap();
+
+    // 查询所有视频控制器的 PNPDeviceID
+    let results: Vec<HashMap<String, Variant>> = wmi_con
+        .raw_query("SELECT PNPDeviceID, CreationClassName, AdapterRAM, MaxMemorySupported, Name FROM Win32_VideoController")
+        .unwrap();
+
+    for (i, row) in results.into_iter().enumerate() {
+        println!("#{i} {row:?}");
+        if let Some(Variant::String(pnpid)) = row.get("PNPDeviceID") {
+            println!("GPU {}: PNPDeviceID = {}", i, pnpid);
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::get_gpu_guid;
+
+    #[test]
+    fn it_works() {
+        get_gpu_guid()
     }
 }
