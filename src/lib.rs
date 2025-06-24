@@ -1,8 +1,9 @@
 use napi_derive::napi;
-use serde::Deserialize;
 use std::path::Path;
 
-mod core;
+mod encoding;
+mod virtualization;
+mod windows_feature;
 
 #[napi(object)]
 pub struct VirtualizationInfo {
@@ -17,7 +18,7 @@ pub struct VirtualizationInfo {
 
 #[napi]
 pub fn get_virtualization() -> VirtualizationInfo {
-    let (cpu_supported, _, cpu_feature_name) = core::check_virtual_support();
+    let (cpu_supported, _, cpu_feature_name) = virtualization::check_virtual_support();
     let os = if cfg!(target_os = "windows") {
         "windows"
     } else if cfg!(target_os = "linux") {
@@ -37,15 +38,15 @@ pub fn get_virtualization() -> VirtualizationInfo {
     let (os_reported_enabled, os_check_details) = {
         #[cfg(target_os = "windows")]
         {
-            core::check_virtualization_enabled_windows()
+            virtualization::check_virtualization_enabled_windows()
         }
         #[cfg(target_os = "macos")]
         {
-            core::check_hypervisor_support_macos()
+            virtualization::check_hypervisor_support_macos()
         }
         #[cfg(target_os = "linux")]
         {
-            core::check_kvm_via_api_linux()
+            virtualization::check_kvm_via_api_linux()
         }
         #[cfg(not(any(target_os = "windows", target_os = "macos", target_os = "linux")))]
         {
@@ -91,29 +92,12 @@ pub struct SystemEncoding {
     pub oem_encoding: &'static str,
 }
 
+#[allow(deprecated)]
 #[cfg(target_os = "windows")]
 #[napi]
 pub fn get_system_encoding() -> SystemEncoding {
-    use windows::Win32::Globalization::{GetACP, GetOEMCP};
-
-    let ansi_code = unsafe { GetACP() };
-    let ansi_encoding = match ansi_code {
-        65001 => "UTF-8",
-        936 => "GBK",
-        950 => "BIG5",
-        1252 => "WINDOWS-1252",
-        932 => "SHIFT-JIS",
-        _ => "UNKNOWN",
-    };
-    let oem_code = unsafe { GetOEMCP() };
-    let oem_encoding = match oem_code {
-        65001 => "UTF-8",
-        936 => "GBK",
-        950 => "BIG5",
-        1252 => "WINDOWS-1252",
-        932 => "SHIFT-JIS",
-        _ => "UNKNOWN",
-    };
+    let (ansi_code, ansi_encoding) = encoding::get_system_encoding();
+    let (oem_code, oem_encoding) = encoding::get_console_encoding();
     SystemEncoding {
         ansi_code,
         ansi_encoding,
@@ -128,132 +112,146 @@ pub fn get_version() -> &'static str {
 }
 
 #[napi(object)]
-pub struct QueryResult{
-    pub value: bool,
-    pub messages: Vec<String>,
+pub struct FeatureStatus {
+    pub enabled: bool,
+    pub details: Vec<String>,
 }
 
 #[cfg(target_os = "windows")]
 #[napi]
-pub async fn is_hyperv_enabled() -> QueryResult {
-    let mut result = QueryResult {
-        value: false,
-        messages: vec![],
-    };
-    result.value = check_hyperv_via_wmi().await.unwrap_or_else(|err| {
-        result.messages.push(format!("通过 WMI 查询 HyperVisor Optional Feature 失败, 原因: {:?}", err));
-        Path::new("C:\\Windows\\System32\\vmcompute.exe").exists()
-    });
-    result
-}
+pub fn is_hyperv_enabled() -> FeatureStatus {
+    let mut details = vec![];
 
-#[cfg(target_os = "windows")]
-#[napi]
-pub async fn is_wsl_enabled() -> QueryResult {
-    let mut result = QueryResult {
-        value: false,
-        messages: vec![],
-    };
-    result.value = check_wsl_via_wmi().await.unwrap_or_else(|err| {
-        result.messages.push(format!("通过 WMI 查询 WLS Optional Feature 失败, 原因: {:?}", err));
-        check_wsl_via_reg()
-    });
-    result
-}
-
-#[derive(Deserialize, Debug)]
-#[serde(rename = "Win32_OptionalFeature")]
-#[serde(rename_all = "PascalCase")]
-struct OptionalFeature {
-    // InstallState: 1 = Enabled, 2 = Disabled, 3 = Absent
-    install_state: u32,
-}
-
-#[cfg(target_os = "windows")]
-async fn check_wsl_via_wmi() -> Result<bool, String> {
-    let results = tokio::task::spawn_blocking(|| {
-        use wmi::{COMLibrary, WMIConnection};
-        let com_lib = COMLibrary::new()?;
-        let wmi_con = WMIConnection::new(com_lib.into())?;
-
-        // 构建 WMI 查询
-        let query = "SELECT InstallState FROM Win32_OptionalFeature WHERE Name = 'Microsoft-Windows-Subsystem-Linux'";
-
-        let results: Vec<OptionalFeature> = wmi_con.raw_query(query)?;
-        Ok(results) as Result<Vec<OptionalFeature>, wmi::WMIError>
-    })
-        .await;
-    let results = match results {
-        Ok(results) => results,
-        Err(err) => return Err(format!("无法在新的线程执行 WMI 查询，原因: {:?}", err)),
-    };
-    let results = match results {
-        Ok(results) => results,
-        Err(err) => {
-            return match err {
-                wmi::WMIError::HResultError { hres } => Err(format!(
-                    "WMI error: {}#{hres}",
-                    windows::core::HRESULT::from_nt(hres).message()
-                )),
-                _ => Err(format!("WMI error: {:?}", err)),
-            };
+    match windows_feature::hypervisor::check_hyperv_via_service() {
+        Ok(running) => {
+            details.push(format!(
+                "服务 'vmms': 状态为 '{}'。",
+                if running { "正在运行" } else { "已停止" }
+            ));
+            if running {
+                return FeatureStatus {
+                    enabled: true,
+                    details,
+                };
+            }
         }
-    };
-
-    if let Some(feature) = results.first() {
-        // InstallState == 1 意味着 "Enabled"
-        Ok(feature.install_state == 1)
-    } else {
-        Ok(false)
+        Err(err) => {
+            details.push(format!("服务 'vmms' 查询失败: {:?}。", err));
+        }
+    }
+    match windows_feature::hypervisor::check_hyperv_via_wmi() {
+        Ok(enabled) => {
+            details.push(format!(
+                "WMI 检查: Hyper-V 可选功能状态为 {}。",
+                if enabled { "已启用" } else { "未启用" }
+            ));
+            if enabled {
+                return FeatureStatus {
+                    enabled: true,
+                    details,
+                };
+            }
+        }
+        Err(err) => match err {
+            wmi::WMIError::HResultError { hres } => {
+                details.push(format!(
+                    "WMI 查询失败: {:?}(#0x{:0x})",
+                    windows::core::HRESULT::from_nt(hres).message(),
+                    hres
+                ));
+            }
+            _ => {
+                details.push(format!("WMI 查询失败: {:?}。", err));
+            }
+        },
+    }
+    details.push("所有检测方法均未能确认 Hyper-V 已完全启用。".to_string());
+    FeatureStatus {
+        enabled: false,
+        details,
     }
 }
 
 #[cfg(target_os = "windows")]
-fn check_wsl_via_reg() -> bool {
-    use winreg::RegKey;
-    use winreg::enums::HKEY_LOCAL_MACHINE;
-    RegKey::predef(HKEY_LOCAL_MACHINE).open_subkey(r"SYSTEM\CurrentControlSet\Services\lxss").is_ok()
-}
+#[napi]
+pub fn is_wsl_enabled() -> FeatureStatus {
+    let mut details = vec![];
 
-#[cfg(target_os = "windows")]
-async fn check_hyperv_via_wmi() -> Result<bool, String> {
-    let results = tokio::task::spawn_blocking(|| {
-        use wmi::{COMLibrary, WMIConnection};
-        let com_lib = COMLibrary::new()?;
-        let wmi_con = WMIConnection::new(com_lib.into())?;
+    if !Path::new("C:\\Windows\\System32\\wsl.exe").exists() {
+        details.push("文件检查: 未找到 wsl.exe，WSL 未安装。".to_string());
+        return FeatureStatus {
+            enabled: false,
+            details,
+        };
+    }
 
-        // 构建 WMI 查询
-        let query =
-            "SELECT InstallState FROM Win32_OptionalFeature WHERE Name = 'Microsoft-Hyper-V-All'";
+    details.push("文件检查: 找到 wsl.exe。".to_string());
 
-        let results: Vec<OptionalFeature> = wmi_con.raw_query(query)?;
-        Ok(results) as Result<Vec<OptionalFeature>, wmi::WMIError>
-    })
-    .await;
-    let results = match results {
-        Ok(results) => results,
-        Err(err) => return Err(format!("无法在新的线程执行 WMI 查询，原因: {:?}", err)),
-    };
-    let results = match results {
-        Ok(results) => results,
+    match windows_feature::wsl::check_wsl_via_service() {
+        Ok(running) => {
+            details.push(format!(
+                "服务 'LxssManager': 状态为 '{}'。",
+                if running { "正在运行" } else { "已停止" }
+            ));
+            if running {
+                return FeatureStatus {
+                    enabled: true,
+                    details,
+                };
+            }
+        }
         Err(err) => {
-            return match err {
-                wmi::WMIError::HResultError { hres } => Err(format!(
-                    "WMI error: {}#{hres}",
-                    windows::core::HRESULT::from_nt(hres).message()
-                )),
-                _ => Err(format!("WMI error: {:?}", err)),
+            details.push(format!("服务 'LxssManager' 查询失败: {:?}。", err));
+        }
+    }
+    match windows_feature::wsl::check_wsl_via_reg() {
+        true => {
+            details.push("注册表检查: WSL 已启用。".to_string());
+
+            return FeatureStatus {
+                enabled: true,
+                details,
             };
         }
-    };
+        false => {
+            details.push("注册表检查: WSL 未启用。".to_string());
+        }
+    }
+    match windows_feature::wsl::check_wsl_via_wmi() {
+        Ok((wsl_enabled, vmp_enabled)) => {
+            details.push(format!(
+                "WMI: 'Microsoft-Windows-Subsystem-Linux' 状态为 {}.",
+                if wsl_enabled {
+                    "已启用"
+                } else {
+                    "未启用"
+                }
+            ));
+            details.push(format!(
+                "WMI: 'VirtualMachinePlatform' 状态为 {}.",
+                if vmp_enabled {
+                    "已启用"
+                } else {
+                    "未启用"
+                }
+            ));
 
-    if let Some(feature) = results.first() {
-        // println!("通过 WMI 查询到功能状态: {:?}", feature);
-        // InstallState == 1 意味着 "Enabled"
-        Ok(feature.install_state == 1)
-    } else {
-        // println!("WMI 查询未返回任何关于 'Microsoft-Windows-Subsystem-Linux' 的信息。");
-        Ok(false)
+            let fully_enabled = wsl_enabled && vmp_enabled;
+            if fully_enabled {
+                return FeatureStatus {
+                    enabled: true,
+                    details,
+                };
+            }
+        }
+        Err(e) => {
+            details.push(format!("WMI 查询可选功能失败: {:?}。", e));
+        }
+    }
+    details.push("所有检测方法均未能确认 WSL 已完全启用。".to_string());
+    FeatureStatus {
+        enabled: false,
+        details,
     }
 }
 
@@ -279,17 +277,47 @@ pub fn get_gpu_guid() {
     }
 }
 
+#[napi]
+#[cfg(target_os = "windows")]
+pub fn get_thread_com_state() -> String {
+    use windows::Win32::System::Com::{APTTYPE, CoGetApartmentType};
+    use windows::core::HRESULT;
+
+    let mut apt_type = APTTYPE(0);
+    let mut apt_qualifier = windows::Win32::System::Com::APTTYPEQUALIFIER(0);
+
+    // CoGetApartmentType 是一个安全的查询函数，它不会初始化或改变任何东西
+    let hr = unsafe { CoGetApartmentType(&mut apt_type, &mut apt_qualifier) };
+
+    match hr {
+        Ok(()) => match apt_type {
+            windows::Win32::System::Com::APTTYPE_STA => {
+                "STA (Single-Threaded Apartment)".to_string()
+            }
+            windows::Win32::System::Com::APTTYPE_MTA => {
+                "MTA (Multi-Threaded Apartment)".to_string()
+            }
+            windows::Win32::System::Com::APTTYPE_NA => "NA (Neutral Apartment)".to_string(),
+            _ => format!("Unknown Apartment Type ({})", apt_type.0),
+        },
+        Err(err) => {
+            if err == HRESULT::from_win32(0x800401F0).into()
+            /* CO_E_NOTINITIALIZED */
+            {
+                "Not Initialized".to_string()
+            } else {
+                format!("Failed to get apartment type, HRESULT: {:#X}", err.code().0)
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
-    fn it_works() {
+    fn test_gpu_guid() {
         get_gpu_guid()
-    }
-    
-    #[test]
-    fn test_wsl_via_reg() {
-        assert!(check_wsl_via_reg());
     }
 }

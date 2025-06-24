@@ -1,10 +1,10 @@
 {
-  "name": "virtualization-checker",
+  "name": "virt-detect",
   "version": "0.0.0",
   "main": "index.js",
   "types": "index.d.ts",
   "napi": {
-    "name": "virtualization-checker",
+    "name": "virt-detect",
     "triples": {}
   },
   "license": "MIT",
@@ -17,8 +17,8 @@
   },
   "scripts": {
     "artifacts": "napi artifacts",
-    "build": "napi build --platform --release --cargo-name=virtualization_checker",
-    "build:debug": "napi build --platform --cargo-name=virtualization_checker",
+    "build": "napi build --platform --release --cargo-name=virt_detect_lib",
+    "build:debug": "napi build --platform --cargo-name=virt_detect_lib",
     "prepublishOnly": "napi prepublish -t npm",
     "universal": "napi universal",
     "version": "napi version",
