@@ -1,9 +1,5 @@
 #![cfg(target_os = "windows")]
-use serde::Deserialize;
-
-thread_local! {
-    static COM_LIB: wmi::WMIResult<wmi::COMLibrary> = wmi::COMLibrary::new();
-}
+use serde::{Deserialize, de::DeserializeOwned};
 
 #[derive(Deserialize, Debug)]
 #[serde(rename = "Win32_OptionalFeature")]
@@ -62,22 +58,33 @@ pub fn get_thread_com_state() -> String {
     }
 }
 
+fn execute_wmi_query<T: DeserializeOwned + Send + 'static>(
+    query: &'static str,
+) -> Result<Vec<T>, String> {
+    // 使用新线程来出现防止 STA、MTA 问题
+    let task = std::thread::spawn(move || -> Result<Vec<T>, wmi::WMIError> {
+        let com_lib = wmi::COMLibrary::new()?;
+        let wmi_con = wmi::WMIConnection::new(com_lib)?;
+
+        let results: Vec<T> = wmi_con.raw_query(query)?;
+        Ok(results)
+    });
+    let results = task
+        .join()
+        .map_err(|err| format!("在新线程执行 WMI 查询失败, 原因: {err:?}"))?
+        .map_err(|err| wmi_err_to_string(&err))?;
+
+    Ok(results)
+}
 
 pub mod wsl {
     use super::*;
 
     pub fn check_wsl_via_wmi() -> Result<(bool, bool), String> {
-        use wmi::WMIConnection;
-        let com_lib = COM_LIB.with(|com| match com {
-            Ok(lib) => Ok(*lib),
-            Err(err) => Err(wmi_err_to_string(err)),
-        })?;
-        let wmi_con = WMIConnection::new(com_lib.into()).map_err(|err|wmi_err_to_string(&err))?;
-
         // 构建 WMI 查询
         let query = "SELECT Name, InstallState FROM Win32_OptionalFeature WHERE Name = 'Microsoft-Windows-Subsystem-Linux' OR Name = 'VirtualMachinePlatform'";
 
-        let results: Vec<OptionalFeature> = wmi_con.raw_query(query).map_err(|err|wmi_err_to_string(&err))?;
+        let results: Vec<OptionalFeature> = execute_wmi_query(query)?;
 
         let mut wsl_enabled = false;
         let mut vmp_enabled = false;
@@ -117,17 +124,10 @@ pub mod hypervisor {
     use super::*;
 
     pub fn check_hyperv_via_wmi() -> Result<bool, String> {
-        use wmi::WMIConnection;
-        let com_lib = COM_LIB.with(|com| match com {
-            Ok(lib) => Ok(*lib),
-            Err(err) => Err(wmi_err_to_string(err)),
-        })?;
-        let wmi_con = WMIConnection::new(com_lib.into()).map_err(|err|wmi_err_to_string(&err))?;
-
         // 构建 WMI 查询
         let query = "SELECT Name, InstallState FROM Win32_OptionalFeature WHERE Name = 'Microsoft-Hyper-V-All'";
 
-        let results: Vec<OptionalFeature> = wmi_con.raw_query(query).map_err(|err|wmi_err_to_string(&err))?;
+        let results: Vec<OptionalFeature> = execute_wmi_query(query)?;
 
         if let Some(feature) = results.first() {
             // println!("通过 WMI 查询到功能状态: {:?}", feature);
