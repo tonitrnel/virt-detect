@@ -2,7 +2,7 @@
 use serde::Deserialize;
 
 thread_local! {
-    static COM_LIB: wmi::COMLibrary = wmi::COMLibrary::new().unwrap();
+    static COM_LIB: wmi::WMIResult<wmi::COMLibrary> = wmi::COMLibrary::new();
 }
 
 #[derive(Deserialize, Debug)]
@@ -14,18 +14,70 @@ struct OptionalFeature {
     install_state: u32,
 }
 
+fn wmi_err_to_string(err: &wmi::WMIError) -> String {
+    match err {
+        wmi::WMIError::HResultError { hres } => {
+            format!(
+                "WMI 查询失败, 原因: {:?}({hres}), COM 线程状态: {:?}",
+                windows::core::HRESULT::from_nt(*hres).message(),
+                get_thread_com_state()
+            )
+        }
+        _ => {
+            format!("WMI 查询失败, 原因: {err:?}")
+        }
+    }
+}
+
+pub fn get_thread_com_state() -> String {
+    use windows::Win32::System::Com::{APTTYPE, CoGetApartmentType};
+    use windows::core::HRESULT;
+
+    let mut apt_type = APTTYPE(0);
+    let mut apt_qualifier = windows::Win32::System::Com::APTTYPEQUALIFIER(0);
+
+    // CoGetApartmentType 是一个安全的查询函数，它不会初始化或改变任何东西
+    let hr = unsafe { CoGetApartmentType(&mut apt_type, &mut apt_qualifier) };
+
+    match hr {
+        Ok(()) => match apt_type {
+            windows::Win32::System::Com::APTTYPE_STA => {
+                "STA (Single-Threaded Apartment)".to_string()
+            }
+            windows::Win32::System::Com::APTTYPE_MTA => {
+                "MTA (Multi-Threaded Apartment)".to_string()
+            }
+            windows::Win32::System::Com::APTTYPE_NA => "NA (Neutral Apartment)".to_string(),
+            _ => format!("Unknown Apartment Type ({})", apt_type.0),
+        },
+        Err(err) => {
+            if err == HRESULT::from_win32(0x800401F0).into()
+            /* CO_E_NOTINITIALIZED */
+            {
+                "Not Initialized".to_string()
+            } else {
+                format!("Failed to get apartment type, HRESULT: {:#X}", err.code().0)
+            }
+        }
+    }
+}
+
+
 pub mod wsl {
     use super::*;
 
-    pub fn check_wsl_via_wmi() -> Result<(bool, bool), wmi::WMIError> {
+    pub fn check_wsl_via_wmi() -> Result<(bool, bool), String> {
         use wmi::WMIConnection;
-        let com_lib = COM_LIB.with(|com| *com);
-        let wmi_con = WMIConnection::new(com_lib.into())?;
+        let com_lib = COM_LIB.with(|com| match com {
+            Ok(lib) => Ok(*lib),
+            Err(err) => Err(wmi_err_to_string(err)),
+        })?;
+        let wmi_con = WMIConnection::new(com_lib.into()).map_err(|err|wmi_err_to_string(&err))?;
 
         // 构建 WMI 查询
         let query = "SELECT Name, InstallState FROM Win32_OptionalFeature WHERE Name = 'Microsoft-Windows-Subsystem-Linux' OR Name = 'VirtualMachinePlatform'";
 
-        let results: Vec<OptionalFeature> = wmi_con.raw_query(query)?;
+        let results: Vec<OptionalFeature> = wmi_con.raw_query(query).map_err(|err|wmi_err_to_string(&err))?;
 
         let mut wsl_enabled = false;
         let mut vmp_enabled = false;
@@ -64,16 +116,18 @@ pub mod wsl {
 pub mod hypervisor {
     use super::*;
 
-    pub fn check_hyperv_via_wmi() -> Result<bool, wmi::WMIError> {
+    pub fn check_hyperv_via_wmi() -> Result<bool, String> {
         use wmi::WMIConnection;
-        let com_lib = COM_LIB.with(|com| *com);
-        let wmi_con = WMIConnection::new(com_lib.into())?;
+        let com_lib = COM_LIB.with(|com| match com {
+            Ok(lib) => Ok(*lib),
+            Err(err) => Err(wmi_err_to_string(err)),
+        })?;
+        let wmi_con = WMIConnection::new(com_lib.into()).map_err(|err|wmi_err_to_string(&err))?;
 
         // 构建 WMI 查询
-        let query =
-            "SELECT Name, InstallState FROM Win32_OptionalFeature WHERE Name = 'Microsoft-Hyper-V-All'";
+        let query = "SELECT Name, InstallState FROM Win32_OptionalFeature WHERE Name = 'Microsoft-Hyper-V-All'";
 
-        let results: Vec<OptionalFeature> = wmi_con.raw_query(query)?;
+        let results: Vec<OptionalFeature> = wmi_con.raw_query(query).map_err(|err|wmi_err_to_string(&err))?;
 
         if let Some(feature) = results.first() {
             // println!("通过 WMI 查询到功能状态: {:?}", feature);

@@ -152,18 +152,7 @@ pub fn is_hyperv_enabled() -> FeatureStatus {
                 };
             }
         }
-        Err(err) => match err {
-            wmi::WMIError::HResultError { hres } => {
-                details.push(format!(
-                    "WMI 查询失败: {:?}(#0x{:0x})",
-                    windows::core::HRESULT::from_nt(hres).message(),
-                    hres
-                ));
-            }
-            _ => {
-                details.push(format!("WMI 查询失败: {:?}。", err));
-            }
-        },
+        Err(err) => details.push(err),
     }
     details.push("所有检测方法均未能确认 Hyper-V 已完全启用。".to_string());
     FeatureStatus {
@@ -273,41 +262,6 @@ pub fn get_gpu_guid() {
         println!("#{i} {row:?}");
         if let Some(Variant::String(pnpid)) = row.get("PNPDeviceID") {
             println!("GPU {}: PNPDeviceID = {}", i, pnpid);
-        }
-    }
-}
-
-#[napi]
-#[cfg(target_os = "windows")]
-pub fn get_thread_com_state() -> String {
-    use windows::Win32::System::Com::{APTTYPE, CoGetApartmentType};
-    use windows::core::HRESULT;
-
-    let mut apt_type = APTTYPE(0);
-    let mut apt_qualifier = windows::Win32::System::Com::APTTYPEQUALIFIER(0);
-
-    // CoGetApartmentType 是一个安全的查询函数，它不会初始化或改变任何东西
-    let hr = unsafe { CoGetApartmentType(&mut apt_type, &mut apt_qualifier) };
-
-    match hr {
-        Ok(()) => match apt_type {
-            windows::Win32::System::Com::APTTYPE_STA => {
-                "STA (Single-Threaded Apartment)".to_string()
-            }
-            windows::Win32::System::Com::APTTYPE_MTA => {
-                "MTA (Multi-Threaded Apartment)".to_string()
-            }
-            windows::Win32::System::Com::APTTYPE_NA => "NA (Neutral Apartment)".to_string(),
-            _ => format!("Unknown Apartment Type ({})", apt_type.0),
-        },
-        Err(err) => {
-            if err == HRESULT::from_win32(0x800401F0).into()
-            /* CO_E_NOTINITIALIZED */
-            {
-                "Not Initialized".to_string()
-            } else {
-                format!("Failed to get apartment type, HRESULT: {:#X}", err.code().0)
-            }
         }
     }
 }
