@@ -1,5 +1,5 @@
 import { expect, test, describe } from "vitest";
-import { getVirtualization, isWslEnabled, isHypervEnabled, getThreadComState } from "../index";
+import { getVirtualization, isWslEnabled, isHypervEnabled, getMachineId } from "../index";
 
 describe("Virtualization", () => {
   test("getVirtualization", () => {
@@ -39,7 +39,7 @@ describe("WMI Conflict Reproduction", () => {
    */
   test("should trigger COM conflict when WMI functions are called sequentially", async () => {
     console.log("--- 开始顺序调用 WMI 函数 ---");
-    console.log("线程状态:",getThreadComState())
+    // console.log("线程状态:",getThreadComState())
     // 我们使用 try...catch 来捕获预期的错误，这样测试本身就不会失败。
     try {
       // 第一次调用：这通常会成功，并为当前线程设置 COM 模式。
@@ -83,3 +83,14 @@ describe("WMI Conflict Reproduction", () => {
     // expect.fail("未能复现 COM 冲突错误。两个调用都成功了。");
   });
 });
+
+describe("MachineID", () => {
+  test("getMachineID", () => {
+    const result = getMachineId();
+    expect(result).toBeDefined();
+    expect(result.error).toBeUndefined();
+    expect(result.machineId).toBeDefined();
+    expect(result.factors).toBeInstanceOf(Array);
+    console.log(result)
+  })
+})

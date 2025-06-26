@@ -4,6 +4,7 @@ use std::path::Path;
 mod encoding;
 mod virtualization;
 mod windows_feature;
+mod machine_id;
 
 #[napi(object)]
 pub struct VirtualizationInfo {
@@ -244,34 +245,30 @@ pub fn is_wsl_enabled() -> FeatureStatus {
     }
 }
 
-#[cfg(target_os = "windows")]
-pub fn get_gpu_guid() {
-    use std::collections::HashMap;
-    use wmi::{COMLibrary, Variant, WMIConnection};
-
-    // 初始化 COM 和 WMI 连接
-    let com_con = COMLibrary::new().unwrap();
-    let wmi_con = WMIConnection::new(com_con.into()).unwrap();
-
-    // 查询所有视频控制器的 PNPDeviceID
-    let results: Vec<HashMap<String, Variant>> = wmi_con
-        .raw_query("SELECT PNPDeviceID, CreationClassName, AdapterRAM, MaxMemorySupported, Name FROM Win32_VideoController")
-        .unwrap();
-
-    for (i, row) in results.into_iter().enumerate() {
-        println!("#{i} {row:?}");
-        if let Some(Variant::String(pnpid)) = row.get("PNPDeviceID") {
-            println!("GPU {}: PNPDeviceID = {}", i, pnpid);
-        }
-    }
+#[napi(object)]
+pub struct MachineIdResult{
+    pub machine_id: Option<String>,
+    pub error: Option<String>,
+    pub factors: Vec<String>,
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_gpu_guid() {
-        get_gpu_guid()
+#[cfg(target_os = "windows")]
+#[napi]
+pub fn get_machine_id() -> MachineIdResult {
+    match machine_id::windows::get_machine_id_with_factors() { 
+        Ok((machine_id, factors)) => {
+            MachineIdResult {
+                machine_id: Some(machine_id),
+                error: None,
+                factors: factors.into_iter().collect()
+            }
+        },
+        Err(err) => {
+            MachineIdResult {
+                machine_id: None,
+                error: Some(err.to_string()),
+                factors: vec![],
+            }
+        }
     }
 }
