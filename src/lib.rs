@@ -252,10 +252,31 @@ pub struct MachineIdResult{
     pub factors: Vec<String>,
 }
 
+#[napi]
+pub enum MachineIdFactor {
+    Baseboard,
+    Processor,
+    DiskDrivers,
+    VideoControllers
+}
+
+#[cfg(target_os = "windows")]
+impl Into<machine_id::windows::MachineIdFactor> for MachineIdFactor {
+    fn into(self) -> machine_id::windows::MachineIdFactor {
+        match self {
+            MachineIdFactor::Baseboard => machine_id::windows::MachineIdFactor::Baseboard,
+            MachineIdFactor::Processor => machine_id::windows::MachineIdFactor::Processor,
+            MachineIdFactor::DiskDrivers => machine_id::windows::MachineIdFactor::DiskDrives,
+            MachineIdFactor::VideoControllers => machine_id::windows::MachineIdFactor::VideoControllers
+        }
+    }
+}
+
 #[cfg(target_os = "windows")]
 #[napi]
-pub fn get_machine_id() -> MachineIdResult {
-    match machine_id::windows::get_machine_id_with_factors() { 
+pub fn get_machine_id(factors: Vec<MachineIdFactor>) -> MachineIdResult {
+    let factors = factors.into_iter().map(|it|it.into()).collect();
+    match machine_id::windows::get_machine_id_with_factors(factors) { 
         Ok((machine_id, factors)) => {
             MachineIdResult {
                 machine_id: Some(machine_id),

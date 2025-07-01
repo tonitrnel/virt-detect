@@ -199,8 +199,18 @@ pub mod windows {
         }
     }
 
+    #[derive(PartialEq, Eq)]
+    pub enum MachineIdFactor {
+        Baseboard = 1,
+        Processor,
+        VideoControllers,
+        DiskDrives,
+    }
+
     /// 通过 WMI 查询主板生产商、产品和序列号生产 Machine ID
-    pub fn get_machine_id_with_factors() -> Result<(String, BTreeSet<String>), MachineIdError> {
+    pub fn get_machine_id_with_factors(
+        generation_factors: Vec<MachineIdFactor>,
+    ) -> Result<(String, BTreeSet<String>), MachineIdError> {
         let (tx_request, rx_request) = channel::<WMIQueryRequest>();
         let (tx_response, rx_response) = channel::<WMIQueryResult>();
 
@@ -220,97 +230,105 @@ pub mod windows {
             };
         }
 
-        query_wmi!(WMIQueryRequest::GetBaseboard, |result,
-                                                   factors: &mut BTreeSet<
-            String,
-        >| {
-            if let WMIQueryResult::Baseboard(Some(bios)) = result {
-                if let Some(val) = sanitize_string(bios.manufacturer) {
-                    factors.insert(format!("bios_manufacturer:{}", val));
+        if generation_factors.contains(&MachineIdFactor::Baseboard) {
+            query_wmi!(WMIQueryRequest::GetBaseboard, |result,
+                                                       factors: &mut BTreeSet<
+                String,
+            >| {
+                if let WMIQueryResult::Baseboard(Some(bios)) = result {
+                    if let Some(val) = sanitize_string(bios.manufacturer) {
+                        factors.insert(format!("bios_manufacturer:{}", val));
+                    }
+                    if let Some(val) = sanitize_string(bios.product) {
+                        factors.insert(format!("bios_model:{}", val));
+                    }
+                    if let Some(val) = sanitize_string(bios.serial_number) {
+                        factors.insert(format!("bios_serial:{}", val));
+                    }
+                } else if let WMIQueryResult::Baseboard(None) = result {
+                    // Optionally log or handle case where BIOS info is empty but not an error
                 }
-                if let Some(val) = sanitize_string(bios.product) {
-                    factors.insert(format!("bios_model:{}", val));
+            });
+        }
+        if generation_factors.contains(&MachineIdFactor::Processor) {
+            query_wmi!(WMIQueryRequest::GetProcessor, |result,
+                                                       factors: &mut BTreeSet<
+                String,
+            >| {
+                if let WMIQueryResult::Processor(Some(cpu)) = result {
+                    if let Some(val) = sanitize_string(cpu.name) {
+                        factors.insert(format!("cpu_name:{}", val));
+                    }
+                    if let Some(val) = sanitize_string(cpu.processor_id) {
+                        factors.insert(format!("cpu_id:{}", val));
+                    }
                 }
-                if let Some(val) = sanitize_string(bios.serial_number) {
-                    factors.insert(format!("bios_serial:{}", val));
-                }
-            } else if let WMIQueryResult::Baseboard(None) = result {
-                // Optionally log or handle case where BIOS info is empty but not an error
-            }
-        });
-        query_wmi!(WMIQueryRequest::GetProcessor, |result,
-                                                   factors: &mut BTreeSet<
-            String,
-        >| {
-            if let WMIQueryResult::Processor(Some(cpu)) = result {
-                if let Some(val) = sanitize_string(cpu.name) {
-                    factors.insert(format!("cpu_name:{}", val));
-                }
-                if let Some(val) = sanitize_string(cpu.processor_id) {
-                    factors.insert(format!("cpu_id:{}", val));
-                }
-            }
-        });
-        let mut system_disk_index = None;
-        // 先查询分区，再根据分区的索引查询磁盘，目标是获取系统盘的序列化
-        query_wmi!(
-            WMIQueryRequest::GetDiskPartitions,
-            |result, _factors: &mut BTreeSet<String>| {
-                if let WMIQueryResult::DiskPartitions(partitions) = result {
-                    system_disk_index = partitions.first().map(|it| it.disk_index)
-                }
-            }
-        );
-        if let Some(disk_index) = system_disk_index {
+            });
+        }
+        if generation_factors.contains(&MachineIdFactor::DiskDrives) {
+            let mut system_disk_index = None;
+            // 先查询分区，再根据分区的索引查询磁盘，目标是获取系统盘的序列化
             query_wmi!(
-                WMIQueryRequest::GetDisksDerives,
-                |result, factors: &mut BTreeSet<String>| {
-                    if let WMIQueryResult::DiskDrives(disks) = result {
-                        let system_disk = disks.into_iter().find(|disk| disk.index == disk_index);
-                        if let Some(disk) = system_disk {
-                            if let Some(val) = sanitize_string(disk.model) {
-                                factors.insert(format!("disk_model:{}", val));
+                WMIQueryRequest::GetDiskPartitions,
+                |result, _factors: &mut BTreeSet<String>| {
+                    if let WMIQueryResult::DiskPartitions(partitions) = result {
+                        system_disk_index = partitions.first().map(|it| it.disk_index)
+                    }
+                }
+            );
+            if let Some(disk_index) = system_disk_index {
+                query_wmi!(
+                    WMIQueryRequest::GetDisksDerives,
+                    |result, factors: &mut BTreeSet<String>| {
+                        if let WMIQueryResult::DiskDrives(disks) = result {
+                            let system_disk =
+                                disks.into_iter().find(|disk| disk.index == disk_index);
+                            if let Some(disk) = system_disk {
+                                if let Some(val) = sanitize_string(disk.model) {
+                                    factors.insert(format!("disk_model:{}", val));
+                                }
+                                if let Some(val) = sanitize_string(disk.serial_number) {
+                                    factors.insert(format!("disk_serial:{}", val));
+                                }
                             }
-                            if let Some(val) = sanitize_string(disk.serial_number) {
-                                factors.insert(format!("disk_serial:{}", val));
+                        }
+                    }
+                );
+            }
+        }
+        if generation_factors.contains(&MachineIdFactor::VideoControllers) {
+            query_wmi!(
+                WMIQueryRequest::GetVideoControllers,
+                |result, factors: &mut BTreeSet<String>| {
+                    if let WMIQueryResult::VideoControllers(gpus) = result {
+                        for (i, vc) in gpus.into_iter().enumerate() {
+                            let is_pci = vc
+                                .pnp_device_id
+                                .as_ref()
+                                .map(|it| it.starts_with(r"PCI\VEN_"))
+                                .unwrap_or(false);
+                            if !is_pci {
+                                continue;
+                            }
+                            let mut gpu_factors = Vec::new();
+                            if let Some(val) = sanitize_string(vc.adapter_compatibility) {
+                                gpu_factors.push(format!("gpu{}_manufacturer:{}", i, val));
+                            }
+                            if let Some(val) = sanitize_string(vc.name) {
+                                gpu_factors.push(format!("gpu{}_model:{}", i, val));
+                            }
+                            if let Some(val) = sanitize_string(vc.pnp_device_id) {
+                                gpu_factors.push(format!("gpu{}_pnp_id:{}", i, val));
+                            }
+                            if !gpu_factors.is_empty() {
+                                gpu_factors.sort();
+                                factors.insert(gpu_factors.join(";"));
                             }
                         }
                     }
                 }
             );
         }
-
-        query_wmi!(
-            WMIQueryRequest::GetVideoControllers,
-            |result, factors: &mut BTreeSet<String>| {
-                if let WMIQueryResult::VideoControllers(gpus) = result {
-                    for (i, vc) in gpus.into_iter().enumerate() {
-                        let is_pci = vc
-                            .pnp_device_id
-                            .as_ref()
-                            .map(|it| it.starts_with(r"PCI\VEN_"))
-                            .unwrap_or(false);
-                        if !is_pci {
-                            continue;
-                        }
-                        let mut gpu_factors = Vec::new();
-                        if let Some(val) = sanitize_string(vc.adapter_compatibility) {
-                            gpu_factors.push(format!("gpu{}_manufacturer:{}", i, val));
-                        }
-                        if let Some(val) = sanitize_string(vc.name) {
-                            gpu_factors.push(format!("gpu{}_model:{}", i, val));
-                        }
-                        if let Some(val) = sanitize_string(vc.pnp_device_id) {
-                            gpu_factors.push(format!("gpu{}_pnp_id:{}", i, val));
-                        }
-                        if !gpu_factors.is_empty() {
-                            gpu_factors.sort();
-                            factors.insert(gpu_factors.join(";"));
-                        }
-                    }
-                }
-            }
-        );
 
         if tx_request.send(WMIQueryRequest::Shutdown).is_err() {
             // 工作线程可能已经因为发送错误而提前退出了，这里记录一下但通常不认为是主流程的错误

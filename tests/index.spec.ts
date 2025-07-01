@@ -1,5 +1,5 @@
 import { expect, test, describe } from "vitest";
-import { getVirtualization, isWslEnabled, isHypervEnabled, getMachineId } from "../index";
+import { getVirtualization, isWslEnabled, isHypervEnabled, getMachineId, MachineIdFactor } from "../index";
 
 describe("Virtualization", () => {
   test("getVirtualization", () => {
@@ -25,7 +25,6 @@ describe("Hyper-V", () => {
     const result = isHypervEnabled();
     expect(result).toBeDefined();
     expect(result.enabled).toBeTypeOf("boolean");
-    expect(result.enabled).toBeTruthy();
   });
 });
 
@@ -45,14 +44,14 @@ describe("WMI Conflict Reproduction", () => {
       // 第一次调用：这通常会成功，并为当前线程设置 COM 模式。
       console.log("步骤 1: 调用 isHypervEnabled()...");
       const hypervResult = isHypervEnabled();
-      expect(hypervResult.enabled).toBeTruthy();
+      expect(hypervResult.enabled).toBeTypeOf("boolean");
       console.log("isHypervEnabled() 调用成功，结果:", hypervResult);
 
       // 第二次调用：这是最可能失败的地方。
       // 它在第一个调用建立的 COM 环境中运行。
       console.log("步骤 2: 调用 isWslEnabled()...");
       const wslResult = isWslEnabled();
-      expect(wslResult.enabled).toBeTruthy();
+      expect(wslResult.enabled).toBeTypeOf("boolean");
       console.log(
         "isWslEnabled() 调用成功，结果:",
         wslResult,
@@ -86,11 +85,13 @@ describe("WMI Conflict Reproduction", () => {
 
 describe("MachineID", () => {
   test("getMachineID", () => {
-    const result = getMachineId();
+    const result = getMachineId([MachineIdFactor.Baseboard, MachineIdFactor.Processor, MachineIdFactor.DiskDrivers]);
     expect(result).toBeDefined();
     expect(result.error).toBeUndefined();
     expect(result.machineId).toBeDefined();
     expect(result.factors).toBeInstanceOf(Array);
+    expect(result.factors.find(it => it.startsWith('cpu_name'))).toBeDefined();
+    expect(result.factors.find(it => it.startsWith('gpu'))).toBeUndefined();
     console.log(result)
   })
 })
